@@ -1,17 +1,24 @@
 -- adjust these configuration options as necessary.
--- delay for checking all capacitors
+-- delay for checking all capacitors.
 TICK_DELAY = 100
+-- the number above is set at 100 because if your on a server you
+-- don't want to lag the server out, but if your in single player
+-- feel free to change the number above all you want.
 
 -- threshold in percentages
 GREEN_ZONE = 70
 YELLOW_ZONE = 30
+-- configure this to your preference
 
 NORMAL_POWER_THRESHOLD = 90
 LOW_POWER_THRESHOLD = 10
 
 -- configures what side to emit when low power
 -- a valid side is required.
-SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER = "bottom"
+SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER = "left"
+-- change the side that is corresponding with what side you want the
+-- redstone signal to go to so that you know that you have low power.
 
 -- Active monitors on startup
 MONITORS_ACTIVE = {}
+-- DO NOT CHANGE THIS!!!
