@@ -1,0 +1,17 @@
+-- adjust these configuration options as necessary.
+-- delay for checking all capacitors
+TICK_DELAY = 100
+
+-- threshold in percentages
+GREEN_ZONE = 70
+YELLOW_ZONE = 30
+
+NORMAL_POWER_THRESHOLD = 90
+LOW_POWER_THRESHOLD = 10
+
+-- configures what side to emit when low power
+-- a valid side is required.
+SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER = "bottom"
+
+-- Active monitors on startup
+MONITORS_ACTIVE = {}
