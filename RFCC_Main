@@ -1,0 +1,1149 @@
+-- RFCC (RedstoneFluxControlCenter)
+-- by TheBrosGRIMM_Jr
+
+
+-- Main configuration
+local tArgs = {...}
+local CONFIG_FILE = "power_conf"
+
+local CONFIG_TEMPLATE = [[-- adjust these configuration options as necessary.
+-- delay for checking all capacitors
+TICK_DELAY = ${tickDelay}
+
+-- threshold in percentages
+GREEN_ZONE = ${greenZone}
+YELLOW_ZONE = ${yellowZone}
+
+NORMAL_POWER_THRESHOLD = ${nomalPowerThreshold}
+LOW_POWER_THRESHOLD = ${lowPowerThreshold}
+
+-- configures what side to emit when low power
+-- a valid side is required.
+SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER = "${sideForRedstone}"
+
+-- Active monitors on startup
+MONITORS_ACTIVE = ${monitorsActive}
+]]
+
+local MONITORS_ACTIVE = {}
+
+do
+    if #tArgs > 0 and tArgs[1] == "update" then
+        print("Updating RFCC...")
+        local updateFile = "/rfcc_update"
+        local pastebinKey = "DNLi1dGG"
+        shell.run("pastebin", "get", pastebinKey, updateFile)
+
+        if fs.exists(updateFile) then
+            local programPath = shell.getRunningProgram()
+            fs.delete(programPath)
+            fs.move(updateFile, programPath)
+            print("Success!")
+            return
+        else
+            print("Unable to retrieve update from pastebin.")
+            print("Check your connection, and try again.")
+            error()
+        end
+    end
+end
+
+local function interpolate(s, params)
+    return s:gsub('($%b{})', function(w) return params[w:sub(3, -2)] or w end)
+end
+
+local function saveSettings()
+    local h = fs.open("/"..CONFIG_FILE, "w")
+
+    local settings = {
+        tickDelay = TICK_DELAY or 100,
+        greenZone = GREEN_ZONE or 70,
+        yellowZone = YELLOW_ZONE or 30,
+        nomalPowerThreshold = NORMAL_POWER_THRESHOLD or 90,
+        lowPowerThreshold = LOW_POWER_THRESHOLD or 10,
+        sideForRedstone = SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER or "bottom",
+        monitorsActive = textutils.serialize(MONITORS_ACTIVE)
+    }
+
+    h.write(interpolate(CONFIG_TEMPLATE, settings))
+    h.close()
+end
+
+
+if fs.exists(CONFIG_FILE) == false then
+    print("I can't find my configuration file.")
+    print("Generating one for you.")
+
+    saveSettings()
+
+    print("")
+    print("Configuration file is located at /"..CONFIG_FILE)
+    print("You may edit this file to change my default settings.")
+    print("Once satisfied, run me again.")
+    return
+else
+    os.unloadAPI(CONFIG_FILE)
+
+    if os.loadAPI("/"..CONFIG_FILE) == false then
+        error("Could not load the config file!")
+    end
+
+    CONFIG = nil
+    for k, v in pairs(_G) do
+        if k == CONFIG_FILE then
+            CONFIG = v
+            break
+        end
+    end
+
+    if CONFIG == nil then
+        print("I could not find the necessary config.")
+        print("You probably screwed something up.")
+        error()
+    end
+end
+
+term.setCursorPos(1, 1)
+term.clear()
+print("Starting RF Control Center...")
+sleep(2)
+
+-- Constants
+local GET_ENERGY_STORED_FUNCTION="getEnergyStored"
+local GET_MAX_ENERGY_STORED_FUNCTION="getMaxEnergyStored"
+
+local TICK_DELAY = CONFIG.TICK_DELAY
+local PAUSE_TIME_IN_SECONDS = TICK_DELAY / 20
+
+-- threshold in percentages
+local GREEN_ZONE = CONFIG.GREEN_ZONE
+local YELLOW_ZONE = CONFIG.YELLOW_ZONE
+
+local NORMAL_POWER_THRESHOLD = CONFIG.NORMAL_POWER_THRESHOLD
+local LOW_POWER_THRESHOLD = CONFIG.LOW_POWER_THRESHOLD
+
+-- configures what side to emit when low power
+local SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER = CONFIG.SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER
+
+MONITORS_ACTIVE = CONFIG.MONITORS_ACTIVE
+
+-- state variables
+local clickableLines = {}
+local clickableOutputMonitors = {}
+local monitors = {}
+local capacitors = {}
+local dashboardButtons = {}
+local totalEnergyAvailable, totalCapacity, totalFlowRate = 0, 0, 0
+
+-- Capacitor basic functions
+do
+    capacitors.add = function(params)
+        table.insert(capacitors, params)
+    end
+
+    capacitors.get = function(name)
+        for i, v in ipairs(capacitors) do
+            if name == v.name then
+                return v
+            end
+        end
+
+        return nil
+    end
+
+    capacitors.remove = function(name)
+        local found = nil
+        for i, v in ipairs(capacitors) do
+            if name == v.name then
+                found = i
+                break
+            end
+        end
+
+        if found then
+            table.remove(capacitors, found)
+        end
+    end
+
+    capacitors.clear = function()
+        for i, v in ipairs(capacitors) do
+            capacitors[i] = nil
+        end
+    end
+end
+
+
+-- Special Windows
+local nativeDisplayTabs = {}
+local nativeMonitorTabWindow
+local consoleWindow
+local monitorSelectionWindow
+
+do
+    local nativeTerm = term.native()
+    local width, height = term.getSize()
+    local x, y = 1, 2
+    local newWidth, newHeight = width, height - 1
+
+    nativeTerm.setCursorPos(x, y)
+
+    nativeMonitorTabWindow = window.create(nativeTerm, 1, 1, width, 1, false)
+
+    consoleWindow = window.create(nativeTerm, x, y, newWidth, newHeight, false)
+    consoleWindow.active = true
+
+    monitorSelectionWindow = window.create(nativeTerm, x, y, newWidth, newHeight, false)
+    monitorSelectionWindow.active = true
+end
+
+-- TODO: break up this humongous script into smaller chunks that can be loaded
+--       via os.loadAPI().
+
+
+-- basic functions
+local function tableSize(targetTable)
+    local i = 0
+    for k, v in pairs(targetTable) do
+        i = i + 1
+    end
+
+    return i
+end
+
+local function padRight(text, width, padCharacter)
+    if width == nil then
+        width = term.getSize()
+    end
+
+    padCount = width - string.len(text)
+
+    if padCharacter == nil then
+        padCharacter = " "
+    end
+
+    if padCount > 0 then
+        return text..string.rep(padCharacter, padCount)
+    else
+        return text
+    end
+end
+
+local function padLeft(text, width, padCharacter)
+    if width == nil then
+        width = term.getSize()
+    end
+
+    padCount = width - string.len(text)
+
+    if padCharacter == nil then
+        padCharacter = " "
+    end
+
+    if padCount > 0 then
+        return string.rep(padCharacter, padCount)..text
+    else
+        return text
+    end
+end
+
+local function printZoneText(percent, callback)
+    if percent >= GREEN_ZONE then
+        term.setTextColor(colors.green)
+    elseif percent >= YELLOW_ZONE and percent < GREEN_ZONE then
+        term.setTextColor(colors.yellow)
+    else
+        term.setTextColor(colors.red)
+    end
+
+    callback()
+
+    term.setTextColor(colors.white)
+end
+
+local function resetRedstoneState()
+    for k,v in pairs(rs.getSides()) do
+        rs.setOutput(v, false)
+    end
+end
+-- basic functions
+
+
+-- line drawing API
+local function drawVerticalLine(targetWindow, x, y, height)
+    targetWindow.setCursorPos(x, y)
+
+    targetWindow.setBackgroundColor(colors.blue)
+    for i = 1, height do
+        targetWindow.write(" ")
+        targetWindow.setCursorPos(x, i)
+    end
+    targetWindow.setBackgroundColor(colors.black)
+end
+
+local function drawHorizontalLine(targetWindow, x, y, width)
+    targetWindow.setCursorPos(x, y)
+    targetWindow.setBackgroundColor(colors.blue)
+    targetWindow.write(string.rep(" ", width))
+    targetWindow.setBackgroundColor(colors.black)
+end
+-- line drawing API
+
+
+-- window management
+local console = {
+    log = function(message)
+        local currentTerm = term.current()
+        term.redirect(consoleWindow)
+
+        print(message)
+
+        term.redirect(currentTerm)
+    end
+}
+
+local function showWindows(...)
+    for i, v in ipairs(arg) do
+        if v.active == true then
+            v.setVisible(true)
+        else
+            v.setVisible(false)
+        end
+    end
+end
+
+local function hideWindows(...)
+    for i, v in ipairs(arg) do
+        v.setVisible(false)
+    end
+end
+
+local function getCursorPositionRelativeToParent(currentWindow)
+    -- determine offset of current window from parent
+    local x, y = currentWindow.getPosition()
+    local xOffset, yOffset = x - 1, y - 1
+
+    local cursorX, cursorY = currentWindow.getCursorPos()
+    return cursorX + xOffset, cursorY + yOffset
+end
+
+local function createInformationWindow(parentWindow)
+    local width, height = parentWindow.getSize()
+
+    local widthOffset = 2
+    local heightOffset = 2
+
+    local windowWidth = width - (widthOffset * 2)
+    local windowHeight = height - (heightOffset * 2)
+
+    local informationWindow = window.create(parentWindow, 1 + widthOffset, 1 + heightOffset, windowWidth, windowHeight, false)
+    informationWindow.active = false
+
+    drawHorizontalLine(informationWindow, 1, 1, windowWidth)
+    drawHorizontalLine(informationWindow, 1, windowHeight, windowWidth)
+
+    drawVerticalLine(informationWindow, 1, 1, windowHeight)
+    drawVerticalLine(informationWindow, windowWidth, 1, windowHeight)
+
+    return informationWindow
+end
+
+local function createSummaryWindow(parentWindow, x, y)
+    local width, height = parentWindow.getSize()
+
+    -- we make use of the parent window's cursor position to make it more convenient.
+    local x, y = parentWindow.getCursorPos()
+    local newHeight = height - (y - 1)
+
+    local summaryWindow = window.create(parentWindow, x, y, width, newHeight, false)
+    summaryWindow.active = false
+
+    return summaryWindow
+end
+
+local function printToWindow(targetWindow, widthOffset, text)
+    local x, y = targetWindow.getCursorPos()
+    local width, height = targetWindow.getSize()
+    local maxTextSize = width - (widthOffset * 2)
+
+    targetWindow.write(text:sub(1, maxTextSize))
+    targetWindow.setCursorPos(x, y+1)
+end
+
+local function createDashboardWindows(parentWindow)
+    -- order is important here!
+    local summaryWindow = createSummaryWindow(parentWindow)
+    summaryWindow.active = true
+    local informationWindow = createInformationWindow(parentWindow)
+    informationWindow.active = false
+
+    local windows = {
+        [1] = summaryWindow,
+        [2] = informationWindow,
+
+        getSummaryWindow = function()
+            return summaryWindow
+        end,
+
+        getInformationWindow = function()
+            return informationWindow
+        end
+    }
+
+    return windows
+end
+
+local function initializeNativeDisplayTabs()
+    local nativeTerm = term.native()
+    nativeTerm.setCursorPos(1, 2)
+
+    local dashboardWindows = createDashboardWindows(nativeTerm)
+
+    table.insert(nativeDisplayTabs, {
+        tab = {
+            label = "Dashboard",
+            event = "dashboard_clicked",
+            active = true,
+            startX = 0,
+            startY = 0
+        },
+
+        windows = dashboardWindows
+    })
+    table.insert(nativeDisplayTabs, {
+        tab = {
+            label = "Monitors",
+            event = "monitors_clicked",
+            startX = 0,
+            startY = 0
+        },
+
+        windows = { monitorSelectionWindow }
+    })
+    table.insert(nativeDisplayTabs, {
+        tab = {
+            label = "Console",
+            event = "console_clicked",
+            startX = 0,
+            startY = 0
+        },
+
+        windows = { consoleWindow }
+    })
+
+    nativeDisplayTabs.getSelectedTab = function(x, y)
+        if x == nil or y == nil then
+            return nil
+        end
+
+        for i, v in ipairs(nativeDisplayTabs) do
+            local tab = v.tab
+            local withinX = x >= tab.startX and x <= tab.endX
+            local withinY = y >= tab.startY and y <= tab.endY
+
+            if withinX and withinY then
+                return i
+            end
+        end
+
+        return nil
+    end
+
+    nativeDisplayTabs.setSelectedTab = function(selected)
+        for i, v in ipairs(nativeDisplayTabs) do
+            if i == selected then
+                v.tab.active = true
+            else
+                v.tab.active = false
+            end
+        end
+    end
+
+    nativeDisplayTabs.getActiveTab = function()
+        for i, v in ipairs(nativeDisplayTabs) do
+            if v.tab.active == true then
+                return i
+            end
+        end
+    end
+
+    nativeDisplayTabs.getDashboardWindows = function()
+        return dashboardWindows
+    end
+end
+
+-- window management
+
+
+-- capacitor management
+local function addCapacitors(...)
+    local peripheralList = arg
+
+    if #peripheralList == 0 then
+        peripheralList = peripheral.getNames()
+        capacitors.clear()
+    end
+
+    for i, p in ipairs(peripheralList) do
+        local currentPeripheral = peripheral.wrap(p)
+
+        if currentPeripheral[GET_ENERGY_STORED_FUNCTION] ~= nil and currentPeripheral[GET_MAX_ENERGY_STORED_FUNCTION] ~= nil and currentPeripheral[GET_ENERGY_STORED_FUNCTION]("north") ~= nil then
+            console.log("Adding new capacitor: "..p)
+            capacitors.add({
+                name = p,
+                peripheral = currentPeripheral,
+                lastReading = 0,
+                flowRate = 0,
+                percent = 0
+            })
+        end
+    end
+end
+
+local function removeCapacitors(...)
+    for i, k in ipairs(arg) do
+        capacitors.remove(k)
+    end
+end
+
+local function getReading()
+    local totalEnergyAvailable, totalCapacity, totalFlowRate = 0, 0, 0
+
+    for i, v in ipairs(capacitors) do
+        local currentReading = v.peripheral[GET_ENERGY_STORED_FUNCTION]("north") or 0
+        local capacity = v.peripheral[GET_MAX_ENERGY_STORED_FUNCTION]("north") or 0
+
+        if currentReading ~= nil then
+            v.flowRate = (currentReading - v.lastReading) / TICK_DELAY
+            v.lastReading = currentReading
+
+            if capacity == 0 then
+                v.percent = 0
+            else
+                v.percent = math.floor((currentReading / capacity) * 100)
+            end
+
+            totalEnergyAvailable = totalEnergyAvailable + v.lastReading
+            totalFlowRate = totalFlowRate + v.flowRate
+        end
+
+        totalCapacity = totalCapacity + capacity
+    end
+
+    local sortByLastReading = function(a, b)
+        return a.percent > b.percent
+    end
+
+    table.sort(capacitors, sortByLastReading)
+
+    return totalEnergyAvailable, totalCapacity, totalFlowRate
+end
+
+local function emitRedstoneSignalOnLowPower(percent)
+    if percent < LOW_POWER_THRESHOLD and rs.getOutput(SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER) == false then
+        console.log("Low power threshold reached.")
+        rs.setOutput(SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER, true)
+    elseif percent >= NORMAL_POWER_THRESHOLD and rs.getOutput(SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER) == true then
+        console.log("Back to normal power levels.")
+        rs.setOutput(SIDE_TO_EMIT_REDSTONE_ON_LOW_POWER, false)
+    end
+end
+-- capacitor management
+
+
+-- monitor management
+local function addMonitors(...)
+    local monitorList = arg
+
+    if #monitorList == 0 then
+        monitorList = peripheral.getNames()
+        monitors = {}
+    end
+
+    for i, m in ipairs(monitorList) do
+        local currentPeripheral = peripheral.wrap(m)
+
+        if "monitor" == peripheral.getType(m) and currentPeripheral.isColour() == true then
+            console.log("Adding new monitor: "..m)
+            currentPeripheral.setCursorPos(1, 1)
+            monitors[m] = {
+                peripheral = currentPeripheral,
+                windows = createDashboardWindows(currentPeripheral),
+                active = false
+            }
+        end
+    end
+end
+
+local function removeMonitors(...)
+    local activeMonitorsCount = tableSize(MONITORS_ACTIVE)
+
+    for i, k in ipairs(arg) do
+        monitors[k] = nil
+        dashboardButtons[k] = nil
+        MONITORS_ACTIVE[k] = nil
+    end
+
+    if activeMonitorsCount ~= tableSize(MONITORS_ACTIVE) then
+        saveSettings()
+    end
+end
+-- monitor management
+
+
+-- hotplug system
+local function doWhileMonitorSuspended(callback)
+    os.queueEvent("pause_monitor")
+    callback()
+    os.queueEvent("resume_monitor")
+end
+
+local function hotplugPeripherals()
+    while true do
+        local event, name = os.pullEvent()
+        local callback = nil
+
+        if event == "peripheral" then
+            console.log("Detected new peripheral: "..name)
+
+            callback = function()
+                addMonitors(name)
+                addCapacitors(name)
+            end
+        elseif event == "peripheral_detach" then
+            console.log("Peripheral removed: "..name)
+
+            callback = function()
+                removeMonitors(name)
+                removeCapacitors(name)
+            end
+        elseif event == "monitor_resize" then
+            console.log("Monitor resized: "..name)
+
+            callback = function()
+                monitors[name].peripheral.setCursorPos(1, 1)
+                monitors[name].windows = createDashboardWindows(monitors[name].peripheral)
+                dashboardButtons[name] = nil
+
+                if monitors[name].active == true then
+                    showWindows(unpack(monitors[name].windows))
+                end
+            end
+        end
+
+        if callback ~= nil then
+            doWhileMonitorSuspended(callback)
+        end
+    end
+end
+-- hotplug system
+
+
+-- information window for the capacitors
+local function addClickableLine(monitorName, key, currentY)
+    clickableLines[monitorName][key] = {
+        line = currentY
+    }
+end
+
+local function toggleInformationWindow(summaryWindow, informationWindow, capacitorName)
+    if capacitorName == nil then
+        summaryWindow.active = true
+        informationWindow.active = false
+    else
+        summaryWindow.active = not summaryWindow.active
+        informationWindow.active = not informationWindow.active
+    end
+
+    local capacitor = capacitors.get(capacitorName)
+
+    if informationWindow.active == true then
+        widthOffset = 3
+        heightOffset = 3
+
+        informationWindow.setCursorPos(widthOffset, heightOffset)
+        local width, height = informationWindow.getSize()
+        local labelWidth = width - (widthOffset * 2)
+        local capacity = capacitor.peripheral[GET_MAX_ENERGY_STORED_FUNCTION]("north")
+
+        printToWindow(informationWindow, widthOffset, "Capacitor name:")
+        printToWindow(informationWindow, widthOffset, padRight("    "..capacitorName, labelWidth))
+        printToWindow(informationWindow, widthOffset, "Capacitor type:")
+        printToWindow(informationWindow, widthOffset, padRight("    "..peripheral.getType(capacitorName), labelWidth))
+        printToWindow(informationWindow, widthOffset, "Capacity:")
+        printToWindow(informationWindow, widthOffset, padRight("    "..capacity.." RF", labelWidth))
+        printToWindow(informationWindow, widthOffset, "Available:")
+        printToWindow(informationWindow, widthOffset, padRight("    "..capacitor.lastReading.." RF", labelWidth))
+
+        local closeLabel = " Click anywhere to close "
+
+        local x = math.floor(((width - string.len(closeLabel)) / 2 ) + 0.5)
+
+        informationWindow.setCursorPos(x, height-2)
+
+        informationWindow.setBackgroundColor(colors.red)
+        informationWindow.write(closeLabel)
+        informationWindow.setBackgroundColor(colors.black)
+    end
+
+    showWindows(summaryWindow, informationWindow)
+end
+
+local function checkForSelectableLine(monitorName, x, y)
+    if clickableLines[monitorName] == nil then
+        return nil
+    end
+
+    for k,v in pairs(clickableLines[monitorName]) do
+        if y == v.line then
+            return k
+        end
+    end
+
+    return nil
+end
+
+local function getSelectedDashboardButton(monitorName, x, y)
+    if x == nil or y == nil then
+        return nil
+    end
+
+    local v = dashboardButtons[monitorName]
+
+    local nextButtonSelected = (x >= v.next.startX and x <= v.next.endX) and (y >= v.next.startY and y <= v.next.endY)
+    local prevButtonSelected = (x >= v.prev.startX and x <= v.prev.endX) and (y >= v.prev.startY and y <= v.prev.endY)
+
+    if nextButtonSelected then
+        return "next"
+    elseif prevButtonSelected then
+        return "prev"
+    end
+
+    return nil
+end
+
+-- information window for the capacitors
+
+
+-- main display
+local function renderPaginationButtons(monitorName, max)
+    local width, height = term.getSize()
+    local nextButton = " Next "
+    local previousButton = " Prev "
+    local spacer = "     "
+
+    local dashboardButtonsToRender = previousButton..spacer..nextButton
+    local buttonOffset = (width - (string.len(dashboardButtonsToRender))) / 2
+
+    term.setCursorPos(buttonOffset, height)
+    local x, y = getCursorPositionRelativeToParent(term.current())
+
+    if dashboardButtons[monitorName] ==  nil then
+        dashboardButtons[monitorName] = {
+            prev = {
+                startX = x,
+                startY = y,
+                endX = x,
+                endY = y
+            },
+
+            next = {
+                startX = x,
+                startY = y,
+                endX = x,
+                endY = y
+            },
+
+            offset = 1,
+            max = max
+        }
+    end
+
+    if dashboardButtons[monitorName].offset == 1 then
+        dashboardButtons[monitorName].max = max
+    end
+
+    term.setBackgroundColor(colors.red)
+    term.write(previousButton)
+    dashboardButtons[monitorName].prev.endX, dashboardButtons[monitorName].prev.endY = getCursorPositionRelativeToParent(term.current())
+
+    term.setBackgroundColor(colors.black)
+    term.write(spacer)
+
+    dashboardButtons[monitorName].next.startX, dashboardButtons[monitorName].next.startY = getCursorPositionRelativeToParent(term.current())
+    term.setBackgroundColor(colors.red)
+    term.write(nextButton)
+    dashboardButtons[monitorName].next.endX, dashboardButtons[monitorName].next.endY = getCursorPositionRelativeToParent(term.current())
+
+    term.setBackgroundColor(colors.black)
+end
+
+local function writeSummary(monitorName, totalEnergyAvailable, totalCapacity, totalFlowRate)
+    local width, height = term.getSize()
+    local gridLabel = os.getComputerLabel() or "No name set"
+    local gridLabelOffset = (width - (string.len(gridLabel))) / 2
+
+    term.setCursorPos(gridLabelOffset, 1)
+    term.write(gridLabel)
+    term.setCursorPos(1, 3)
+
+    print(padRight("Total Capacitors: "..tostring(#capacitors)))
+    print(padRight("Max Energy Storage: "..totalCapacity.." RF"))
+
+    local totalPercentRemaining = math.floor((totalEnergyAvailable / totalCapacity) * 100)
+    emitRedstoneSignalOnLowPower(totalPercentRemaining)
+
+    printZoneText(totalPercentRemaining, function() print(padRight("Energy Available: "..totalEnergyAvailable.." RF")) end)
+
+    if totalFlowRate < 0 then
+        term.setTextColor(colors.red)
+    elseif totalFlowRate > 0 then
+        term.setTextColor(colors.green)
+    else
+        term.setTextColor(colors.white)
+    end
+
+    print(padRight("Flow Rate: "..totalFlowRate.." RF/t"))
+    term.setTextColor(colors.white)
+
+    local currentX, currentY = term.getCursorPos()
+    term.setCursorPos(1, currentY+1)
+
+    clickableLines[monitorName] = {}
+    local pagination = dashboardButtons[monitorName] or {}
+    local offset = pagination.offset or 1
+
+    local count = 0
+    for i = offset, #capacitors do
+        local v = capacitors[i]
+        local name = string.format(" %03d", i)..": "
+        local percent = v.percent
+
+        printZoneText(percent, function() term.write(name) end)
+
+        local labelLength = string.len(name)
+        local powerBarLength = width - labelLength - 1
+        local powerBarReading = math.floor((width - labelLength - 1) * (percent/100))
+
+        local zoneColor = colors.red
+        local textColor = colors.white
+        if percent >= GREEN_ZONE then
+            zoneColor = colors.green
+        elseif percent >= YELLOW_ZONE and percent < GREEN_ZONE then
+            zoneColor = colors.yellow
+            textColor = colors.blue
+        end
+
+        local stats = padRight(string.format(" %d", percent).."%, "..v.flowRate.." RF/t", powerBarLength)
+
+        term.setTextColor(textColor)
+        term.setBackgroundColor(zoneColor)
+        j = 1
+        for c in stats:gmatch(".") do
+            if(j>powerBarReading) then
+                term.setBackgroundColor(colors.black)
+            end
+
+            term.write(c)
+
+            j = j + 1
+        end
+        term.setTextColor(colors.white)
+        term.setBackgroundColor(colors.black)
+
+        local currentX, currentY = getCursorPositionRelativeToParent(term.current())
+        addClickableLine(monitorName, v.name, currentY)
+
+        local termX, termY = term.getCursorPos()
+        term.setCursorPos(1, termY+2)
+        count = count + 1
+
+        if termY > (height - 4) then
+            max = count
+            break
+        end
+    end
+
+    local currentX, currentY = term.getCursorPos()
+    for k = currentY, height-1 do
+        term.setCursorPos(1, k)
+        term.clearLine()
+    end
+
+    renderPaginationButtons(monitorName, count)
+end
+
+local function displaySummary(totalEnergyAvailable, totalCapacity, totalFlowRate, targetMonitor)
+    local listOfSummaryWindows = {
+        native = nativeDisplayTabs.getDashboardWindows().getSummaryWindow()
+    }
+
+    for k, v in pairs(monitors) do
+        listOfSummaryWindows[k] = v.windows.getSummaryWindow()
+    end
+
+    for k, v in pairs(listOfSummaryWindows) do
+        if targetMonitor == nil or (k == targetMonitor) then
+            local currentTerm = term.current()
+
+            term.redirect(v)
+
+            writeSummary(k, totalEnergyAvailable, totalCapacity, totalFlowRate)
+
+            term.redirect(currentTerm)
+
+            if k == targetMonitor then
+                return
+            end
+        end
+    end
+end
+
+local function monitorCapacitors()
+    totalEnergyAvailable, totalCapacity, totalFlowRate = 0, 0, 0
+
+    while true do
+        -- show reading
+        displaySummary(totalEnergyAvailable, totalCapacity, totalFlowRate)
+
+        -- need to call this first to get most current sample
+        getReading()
+
+        local samplingTimer = os.startTimer(PAUSE_TIME_IN_SECONDS)
+        while true do
+            local event, p1 = os.pullEvent()
+            if event == "timer" and p1 == samplingTimer then
+                totalEnergyAvailable, totalCapacity, totalFlowRate = getReading()
+                break
+            elseif event == "pause_monitor" then
+                os.pullEvent("resume_monitor")
+                break
+            end
+        end
+    end
+end
+
+local function changePages(monitor, x, y, isInformationWindowActive)
+    local selectedButton = getSelectedDashboardButton(monitor, x, y)
+    local showSummary = false
+
+    if selectedButton == "next" and not isInformationWindowActive then
+        local newOffset = dashboardButtons[monitor].offset + (dashboardButtons[monitor].max or 0)
+        if newOffset <= #capacitors then
+            dashboardButtons[monitor].offset = newOffset
+
+            showSummary = true
+        end
+    elseif selectedButton == "prev" and not isInformationWindowActive then
+        local newOffset = dashboardButtons[monitor].offset - (dashboardButtons[monitor].max or 0)
+        if newOffset > 0 then
+            dashboardButtons[monitor].offset = newOffset
+        else
+            dashboardButtons[monitor].offset = 1
+        end
+
+        showSummary = true
+    end
+
+    if showSummary then
+        displaySummary(totalEnergyAvailable, totalCapacity, totalFlowRate, p1)
+        return true
+    end
+
+    return false
+end
+
+local function nativeDashboardHandler()
+    while true do
+        local event, x, y = os.pullEvent("dashboard_clicked")
+        local isInformationWindowActive = nativeDisplayTabs.getDashboardWindows().getInformationWindow().active
+
+        if not changePages("native", x, y, isInformationWindowActive) then
+            local selectedCapacitor = checkForSelectableLine("native", x, y)
+
+            local summaryWindow = nativeDisplayTabs.getDashboardWindows().getSummaryWindow()
+            local informationWindow = nativeDisplayTabs.getDashboardWindows().getInformationWindow()
+
+            toggleInformationWindow(summaryWindow, informationWindow, selectedCapacitor)
+        end
+    end
+end
+
+local function monitorDashboardHandler()
+    while true do
+        local event, monitor, x, y = os.pullEvent("monitor_touch")
+
+        if monitors[monitor].active == true then
+            local summaryWindow = monitors[monitor].windows.getSummaryWindow()
+            local informationWindow = monitors[monitor].windows.getInformationWindow()
+
+            if not changePages(monitor, x, y, informationWindow.active) then
+                local selectedCapacitor = checkForSelectableLine(monitor, x, y)
+                toggleInformationWindow(summaryWindow, informationWindow, selectedCapacitor)
+            end
+        end
+    end
+end
+-- main display
+
+
+-- monitor selection screen (if monitor is attached)
+local function addClickableOutputMonitor(k, currentY)
+    clickableOutputMonitors[k] = {
+        line = currentY
+    }
+end
+
+local function toggleMonitor(monitorName)
+    monitors[monitorName].active = not monitors[monitorName].active
+
+    if monitors[monitorName].active then
+        console.log("Enabling "..monitorName)
+        MONITORS_ACTIVE[monitorName] = true
+    else
+        console.log("Disabling "..monitorName)
+        MONITORS_ACTIVE[monitorName] = nil
+
+        hideWindows(unpack(monitors[monitorName].windows))
+        monitors[monitorName].peripheral.setBackgroundColor(colors.black)
+        monitors[monitorName].peripheral.clear()
+    end
+
+    saveSettings()
+end
+
+local function showMonitorSelection(targetWindow)
+    local currentTerm = term.current()
+
+    term.redirect(targetWindow)
+    term.setCursorPos(1, 1)
+    term.clear()
+
+    local width, height = term.getSize()
+
+    if tableSize(monitors) > 0 then
+        printToWindow(term, 0, "Select Output Monitor: ")
+    else
+        printToWindow(term, 0, "No Monitors found.")
+    end
+
+    printToWindow(term, 0, "")
+
+    local currentX, currentY = term.getCursorPos()
+    term.setCursorPos(currentX + 2, currentY)
+
+    clickableOutputMonitors = {}
+    for k, v in pairs(monitors) do
+        currentX, currentY = getCursorPositionRelativeToParent(targetWindow)
+        term.setBackgroundColor(colors.black)
+
+        if v.active == true then
+            term.setBackgroundColor(colors.blue)
+            showWindows(unpack(v.windows))
+        end
+
+        label = padRight("  "..k, width-4)
+        printToWindow(term, 0, label)
+
+        addClickableOutputMonitor(k, currentY)
+    end
+    term.setBackgroundColor(colors.black)
+
+    term.redirect(currentTerm)
+
+    while true do
+        local event, x, y = os.pullEvent()
+
+        if "monitors_clicked" == event then
+            for k, v in pairs(clickableOutputMonitors) do
+                if v.line == y then
+                    toggleMonitor(k)
+                    return
+                end
+            end
+        elseif event == "peripheral" or event == "peripheral_detach" then
+            coroutine.yield()
+            return
+        end
+    end
+end
+
+local function monitorSelection()
+    for k, v in pairs(MONITORS_ACTIVE) do
+        if monitors[k] then
+            monitors[k].active = true
+        end
+    end
+
+    while true do
+        showMonitorSelection(monitorSelectionWindow)
+    end
+end
+
+local function nativeDisplay()
+    while true do
+        local currentTerm = term.current()
+
+        term.redirect(nativeMonitorTabWindow)
+        nativeMonitorTabWindow.setVisible(true)
+
+        term.setCursorPos(1, 1)
+        term.setBackgroundColor(colors.gray)
+        term.clearLine()
+        term.setTextColor(colors.yellow)
+
+        for i, v in ipairs(nativeDisplayTabs) do
+            hideWindows(unpack(v.windows))
+        end
+
+        for i, v in ipairs(nativeDisplayTabs) do
+            local tab = v.tab
+            tab.startX, tab.startY = getCursorPositionRelativeToParent(term.current())
+
+            if tab.active then
+                term.setBackgroundColor(colors.black)
+                showWindows(unpack(v.windows))
+            else
+                term.setBackgroundColor(colors.gray)
+            end
+
+            term.write(" "..tab.label.." ")
+            tab.endX, tab.endY = getCursorPositionRelativeToParent(term.current())
+        end
+        term.setTextColor(colors.white)
+        term.redirect(currentTerm)
+
+        while true do
+            local event, selectedTab = os.pullEvent("selected_tab")
+
+            if selectedTab then
+                nativeDisplayTabs.setSelectedTab(selectedTab)
+                break
+            end
+        end
+    end
+end
+
+local function mouseClickEventMonitor()
+    while true do
+        local event, type, x, y = os.pullEvent("mouse_click")
+        local selectedTab = nativeDisplayTabs.getSelectedTab(x, y)
+
+        if selectedTab and nativeDisplayTabs.getDashboardWindows().getInformationWindow().active == false then
+            os.queueEvent("selected_tab", selectedTab)
+        elseif selectedTab == nil then
+            local activeTab = nativeDisplayTabs[nativeDisplayTabs.getActiveTab()]
+
+            os.queueEvent(activeTab.tab.event, x, y)
+        end
+    end
+end
+
+-- Initialization
+initializeNativeDisplayTabs()
+resetRedstoneState()
+addCapacitors()
+addMonitors()
+
+while true do
+    parallel.waitForAll(mouseClickEventMonitor, nativeDisplay, monitorSelection, hotplugPeripherals, monitorCapacitors, nativeDashboardHandler, monitorDashboardHandler)
+end
