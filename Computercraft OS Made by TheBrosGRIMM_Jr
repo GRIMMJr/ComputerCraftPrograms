@@ -1,0 +1,204 @@
+function ChangeColor(text,back)
+	term.setTextColor(text)
+	term.setBackgroundColor(back)
+end
+
+p_run = false
+var_run = false
+local select = 1
+local ERselect = 1
+
+local function Requi()
+	if p_run == false then
+		shell.run("p")
+	end
+	if var_run == false then
+		shell.run("var")
+	end
+end
+
+local function update()
+	Requi()
+	shell.run("updater")
+end
+
+local function RFR()
+	if p_run == false then
+		shell.run("p")
+	end
+	if var_run == false then
+		shell.run("var")
+	end
+	shell.run("EnergyReader")
+end
+
+local option_names = {
+	"Energy Reader",
+	"Help",
+	"lua",
+	os.version(),
+	"Reboot",
+	"Shutdown"
+}
+local ERoption_names = {
+	"Run",
+	"Autorun",
+	"Edit Peripheral",
+	"Manuel update",
+	"Change log",
+  "DEV"
+}
+
+if fs.exists("ERAUTORUN") then
+	RFR()
+end
+
+while true do
+
+	ChangeColor(colors.white,colors.black)
+	term.clear()
+	term.setCursorPos(1,1)
+	term.write("Welcome to EbOS Concept Demo")
+	term.setCursorPos(1,3)
+
+	for i=1,#option_names do
+		if i == select then
+			ChangeColor(colors.black,colors.white)
+		else
+			ChangeColor(colors.white,colors.black)
+		end
+		print(option_names[i])
+
+
+	end
+
+	term.setCursorPos(1,19)
+	ChangeColor(colors.black,colors.white)
+	term.write("Arrow keys = move  Enter = Select  Backspace = Back")
+
+	e,key = os.pullEvent("key")
+	if key == 200 then
+		select = select - 1
+	end
+
+	if key == 208 then
+		select = select + 1
+	end
+
+	if key == 28 then
+		ChangeColor(colors.white,colors.black)
+		if select == 1 then
+			ERlock = true
+			while ERlock == true do
+				for ER = 1,#ERoption_names do
+					if ER == ERselect then
+						ChangeColor(colors.black,colors.white)
+					else
+						ChangeColor(colors.white,colors.black)
+					end
+					term.setCursorPos(18,2+ER)
+					term.write(ERoption_names[ER])
+				end
+				e,key = os.pullEvent("key")
+				if key == 200 then
+					ERselect = ERselect - 1
+				end
+
+				if key == 208 then
+					ERselect = ERselect + 1
+				end
+				if key == 28 then
+					if ERselect == 1 then
+						RFR()
+					end
+					if ERselect == 2 then
+						if fs.exists("ERAUTORUN") == false then
+							h = fs.open("ERAUTORUN","w")
+							h.write("True")
+							h.close()
+						else
+							fs.delete("ERAUTORUN")
+						end
+						os.reboot()
+					end
+					if ERselect == 3 then
+						fs.delete("peripheral")
+						shell.run("p")
+					end
+					if ERselect == 4 then
+						ChangeColor(colors.white,colors.black)
+						update()
+					end
+					if ERselect == 5 then
+						ChangeColor(colors.white,colors.black)
+						Requi()
+						term.clear()
+						changelog = http.get(Database.."/info/changelog")
+						term.setCursorPos(1,1)
+						print(changelog.readAll())
+						print(" ")
+						print("press any key to exit...")
+						os.pullEvent("key")
+					end
+				ERlock = false
+				end
+				if key == 14 then
+					ERlock = false
+				end
+				if ERselect > #ERoption_names then
+					ERselect = 1
+				end
+				if ERselect < 1 then
+					ERselect = #ERoption_names
+				end
+			end
+		end
+		if select == 2 then
+			shell.run("FAQ")
+		end
+		if select == 3 then
+			if fs.exists("DEV") == false then
+				for t =1,20 do
+					term.setCursorPos(1,11)
+					print("WARNING! You are now entering DEV version. Get ready for bugs! Starts in ".. 10-t.."  ")
+					print("Hold ctrl + R to cancle")
+					sleep(1)
+				end
+				d = fs.open("DEV","w")
+				d.write("True")
+				d.close()
+			else
+				fs.delete("DEV")
+			end
+			update()
+			sleep(10)
+		end
+		if select == 4 then
+			term.clear()
+			term.setCursorPos(1,1)
+			shell.run("lua")
+		end
+		if select == 5 then
+			term.clear()
+			term.setCursorPos(1,1)
+			term.setTextColor(colors.yellow)
+			term.write(os.version())
+			term.setTextColor(colors.white)
+			term.setCursorPos(1,2)
+			return
+		end
+		if select == 6 then
+			os.reboot()
+		end
+		if select == 7 then
+			os.shutdown()
+		end
+	end
+
+	if select > #option_names then
+		select = 1
+	end
+	if select < 1 then
+		select = #option_names
+	end
+end
